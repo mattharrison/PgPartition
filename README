@@ -1,0 +1,44 @@
+PgPartition
+============
+
+Script to help generate SQL to deal with Postgres partitions.
+
+One can run the script from the command line or use it as a library to
+generate sql.
+
+Once you have more than 2 partitions, you don't want to be typing in
+commands for every partitioned table.
+
+
+Postgres Partitions
+--------------------
+
+See the Postgres docs for information about partitions.
+
+http://www.postgresql.org/docs/current/interactive/ddl-partitioning.html
+
+This script allows you to generate the code necessary to do what's
+mentioned above.
+
+Using PgPartition
+------------------
+
+PgPartition assumes one has a "master table" that they want to
+partition.  Partitioning is done on a column that is an integer/long
+type.  You can specify the start value, end value and stride for the
+partitions.  (Basically the same as Python slicing, ie end value is up
+to but not including).  See ``--help`` for the options which include:
+
+* DDL to create partitioned tables
+* DDL to drop partitioned tables
+* Insert function creation
+* Insert trigger creation
+* Drop trigger (if re-partitioning)
+* Index creation
+* Index dropping
+* Arbitrary SQL (if you want to vacuum the partitioned tables, etc)
+
+Author
+-------
+
+Matt Harrison (matthewharrison@gmail.com)

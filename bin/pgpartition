@@ -1,0 +1,14 @@
+#!/usr/bin/env python
+# Copyright (c) 2010 Matt Harrison
+
+import sys
+
+import pgpartitionlib
+
+if __name__ == '__main__':
+    try:
+        sys.exit(pgpartitionlib.main(sys.argv))
+    except Exception, e:
+        sys.stderr.write('%s\n'%str(e))
+        sys.exit(1)  
+
