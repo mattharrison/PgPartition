@@ -8,13 +8,18 @@ sql.
 See http://www.postgresql.org/docs/current/interactive/ddl-partitioning.html
 for details
 
-Remember to 
+Remember to
 run:
 CREATE LANGUAGE plpgsql;
 
 update postgres.conf (constraint_exclusion)
 
-Test text
+Test Date-based partitioning
+>>> p = MonthPartitioner()
+>>> print p.create_ddl('test_month', 'date', '2012-01', '2012-04')
+
+
+Test Integer based partitioning
 >>> p = Partitioner()
 >>> stmts = p.create_integer_statements('test_part', 'adweekid', 0, 2, arbitrary_sql='VACUUM ANALYZE %(table)s;')
 
@@ -78,8 +83,10 @@ VACUUM ANALYZE test_part_0;
 VACUUM ANALYZE test_part_1;
 
 '''
-import sys
+import datetime as dt
 import optparse
+import sys
+import time
 
 import meta
 
@@ -87,7 +94,7 @@ class Partitioner(object):
     def __init__(self):
         # probably should put some state in here
         pass
-        
+
 
     def create_ddl(self, *args, **kw):
         return self.create_integer_statements(*args, **kw)[0]
@@ -100,7 +107,7 @@ class Partitioner(object):
 
     def trigger_code(self, *args, **kw):
         return self.create_integer_statements(*args, **kw)[3]
-    
+
     def drop_trigger_code(self, *args, **kw):
         return self.create_integer_statements(*args, **kw)[4]
 
@@ -123,7 +130,7 @@ class Partitioner(object):
         """
         partition_table_name = partition_table_name or master_table_name
         index_columns_list = index_columns_list or [(column,)]
-        
+
         create_stmts = []
         drop_stmts = []
         function_stmts = ["""CREATE OR REPLACE FUNCTION %(table_name)s_insert_function()
@@ -160,7 +167,7 @@ BEGIN""" % dict(table_name=partition_table_name)]
                                       start=prev,
                                       end=num,
                                       if_or_else=if_or_else))
-            
+
             for j, col_list in enumerate(index_columns_list):
                 index_name = "%(table_name)s_%(count)s_index" %dict(table_name=individual_table_name, count=j)
                 create_idx.append("""CREATE INDEX %(index_name)s ON %(table_name)s (%(cols)s);""" %
@@ -182,7 +189,7 @@ END;
 $$
 LANGUAGE plpgsql;"""% dict(table_name=partition_table_name,
                              column=column))
-        
+
         trigger_stmts.append("""CREATE TRIGGER insert_%(table_name)s_trigger
     BEFORE INSERT ON %(table_name)s
     FOR EACH ROW EXECUTE PROCEDURE %(table_name)s_insert_function();"""  % dict(table_name=partition_table_name))
@@ -198,6 +205,66 @@ LANGUAGE plpgsql;"""% dict(table_name=partition_table_name,
         arb_sql = '\n'.join(arb_stmts)
         return create, drop, function, trig, drop_trig, idx, del_idx, arb_sql
 
+
+def month_range(start, end, stride=1, fmt="%Y-%m"):
+    """
+    >>> list(month_range('2012-11', '2013-02'))
+    [datetime.date(2012, 11, 1), datetime.date(2012, 12, 1), datetime.date(2013, 1, 1)]
+    """
+    start_date = dt.date(*time.strptime(start, fmt)[:3])
+    next_month = start_date.month
+    next_year = start_date.year
+    end_date = dt.date(*time.strptime(end, fmt)[:3])
+    end_month = end_date.month
+    end_year = end_date.year
+    item = dt.date(next_year, next_month, 1)
+    while item < end_date:
+        yield item
+        item = add_month(item, stride)
+
+
+def add_month(date, months=1):
+    month = date.month + months
+    if month > 12:
+        year = date.year + (months/12)+1
+        month = month % 12
+    else:
+        year = date.year
+    return dt.date(year, month, 1)
+
+
+def month_chunk(start, end, stride=1, fmt="%Y-%m"):
+    """
+    >>> list(month_chunk('2012-11', '2013-02'))
+    [(datetime.date(2012, 11, 1), datetime.date(2012, 12, 1)), (datetime.date(2012, 12, 1), datetime.date(2013, 1, 1)), (datetime.date(2013, 1, 1), datetime.date(2013, 2, 1))]
+    """
+    prev = None
+    end = add_month(dt.date(*time.strptime(end, fmt)[:3])).strftime(fmt)
+    for date in month_range(start, end, stride, fmt):
+        if prev:
+            yield prev, date
+        prev = date
+
+
+class MonthPartitioner(Partitioner):
+    def create_ddl(self, dbname, column, start, end, fmt="%Y-%m", prefix=''):
+        stmt = []
+        pg_format = "%Y-%m-%d"
+        for date_start, date_end in month_chunk(start, end, fmt=fmt):
+            pg_start = date_start.strftime(pg_format)
+            pg_end = date_end.strftime(pg_format)
+            postfix = '_%s' % pg_start[:-3]  # dont' show day
+            individual_table_name = "%(prefix)s%(table_name)s%(postfix)s" % dict(prefix=prefix,
+                    table_name=dbname,
+                    postfix=postfix)
+            stmt.append("""CREATE TABLE %(table_name)s (
+    CHECK ( %(column)s >= %(start)s AND %(column)s < %(end)s )
+) INHERITS (%(master_table)s);""" % dict(table_name=individual_table_name,
+                                        column=column,
+                                        start=pg_start,
+                                        end=pg_end,
+                                        master_table=dbname))
+        return '\n'.join(stmt)
 
 def gen_chunks(start, end, stride):
     """
@@ -217,7 +284,7 @@ def gen_chunks(start, end, stride):
 def _test():
     import doctest
     doctest.testmod()
-    
+
 def main(prog_args):
     parser = optparse.OptionParser(version=meta.__version__)
     parser.add_option('-m', '--master-table', help='specify master table [REQ]')
@@ -229,7 +296,7 @@ def main(prog_args):
 
     parser.add_option('--create-ddl', action='store_true', help='get ddl for partition table creation')
     parser.add_option('--drop-ddl', action='store_true', help='get ddl for partition table dropping')
-    parser.add_option('--create-function', action='store_true', help='get ddl for partition table function (trigger calls it, will replace existing funciton)') 
+    parser.add_option('--create-function', action='store_true', help='get ddl for partition table function (trigger calls it, will replace existing funciton)')
     parser.add_option('--create-trigger', action='store_true', help='get ddl for partition table trigger creation')
     parser.add_option('--drop-trigger', action='store_true', help='get ddl for dropping partition table trigger')
     parser.add_option('--create-index-ddl', action='store_true', help='get ddl for partition table creating indexes')
@@ -254,7 +321,7 @@ def main(prog_args):
 
     kwargs = dict(master_table_name=opt.master_table, column=opt.column, start=opt.start, end=opt.end,
                   stride=opt.stride, arbitrary_sql=opt.arbitrary_sql)
-    
+
     if opt.create_ddl:
         print p.create_ddl(**kwargs)
     if opt.drop_ddl:
@@ -271,7 +338,7 @@ def main(prog_args):
         print p.drop_idx_ddl(**kwargs)
     if opt.arbitrary_sql:
         print p.sql(**kwargs)
-    
+
 if __name__ == '__main__':
     sys.exit(main(sys.argv))
 
