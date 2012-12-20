@@ -14,17 +14,68 @@ CREATE LANGUAGE plpgsql;
 
 update postgres.conf (constraint_exclusion)
 
-Test Date-based partitioning
->>> p = MonthPartitioner()
->>> print p.create_ddl('test_month', 'date', '2012-01', '2012-04')
-
-
-Test Integer based partitioning
->>> p = Partitioner()
->>> stmts = p.create_integer_statements('test_part', 'adweekid', 0, 2, arbitrary_sql='VACUUM ANALYZE %(table)s;')
+Date-based partitioning
+=============================
 
 Create DDL
->>> print stmts[0]
+----------
+
+>>> p = MonthPartitioner('test_month', 'date', '2012-01', '2012-04')
+>>> print p.create_ddl()
+CREATE TABLE test_month_2012-01 (
+    CHECK ( date >= '2012-01-01' AND date < '2012-02-01' )
+) INHERITS (test_month);
+CREATE TABLE test_month_2012-02 (
+    CHECK ( date >= '2012-02-01' AND date < '2012-03-01' )
+) INHERITS (test_month);
+CREATE TABLE test_month_2012-03 (
+    CHECK ( date >= '2012-03-01' AND date < '2012-04-01' )
+) INHERITS (test_month);
+
+Drop DDL
+---------
+
+>>> print p.drop_ddl()
+DROP TABLE test_month_2012-01;
+DROP TABLE test_month_2012-02;
+DROP TABLE test_month_2012-03;
+
+Function Code
+---------------
+
+>>> print p.function_code()
+CREATE OR REPLACE FUNCTION test_month_insert_function()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF ( NEW.date >= '2012-01-01' AND NEW.date < '2012-02-01' ) THEN
+        INSERT INTO test_month_2012-01 VALUES (NEW.*);
+    ELSIF ( NEW.date >= '2012-02-01' AND NEW.date < '2012-03-01' ) THEN
+        INSERT INTO test_month_2012-02 VALUES (NEW.*);
+    ELSIF ( NEW.date >= '2012-03-01' AND NEW.date < '2012-04-01' ) THEN
+        INSERT INTO test_month_2012-03 VALUES (NEW.*);
+    ELSE
+        RAISE EXCEPTION 'date out of range.  Fix the test_month_insert_function() function!';
+    END IF;
+    RETURN NULL;
+END;
+$$
+LANGUAGE plpgsql;
+
+Trigger Code
+-----------------
+
+>>> print p.trigger_code()
+CREATE TRIGGER insert_test_month_trigger
+    BEFORE INSERT ON test_month
+    FOR EACH ROW EXECUTE PROCEDURE test_month_insert_function();
+
+Test Int-based partitioning
+>>> p = IntPartitioner('test_part', 'adweekid', 0, 2)
+
+Create DDL
+--------------
+
+>>> print p.create_ddl() #stmts[0]
 CREATE TABLE test_part_0 (
     CHECK ( adweekid >= 0 AND adweekid < 1 )
 ) INHERITS (test_part);
@@ -33,13 +84,17 @@ CREATE TABLE test_part_1 (
 ) INHERITS (test_part);
 
 DROP DDL
->>> print stmts[1]
+-----------
+
+>>> print p.drop_ddl()
 DROP TABLE test_part_0;
 DROP TABLE test_part_1;
 
 
 INSERT FUNCTION
->>> print stmts[2]
+----------------
+
+>>> print p.function_code()
 CREATE OR REPLACE FUNCTION test_part_insert_function()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -56,33 +111,42 @@ $$
 LANGUAGE plpgsql;
 
 INSERT TRIGGER
->>> print stmts[3]
+---------------
+>>> print p.trigger_code()
 CREATE TRIGGER insert_test_part_trigger
     BEFORE INSERT ON test_part
     FOR EACH ROW EXECUTE PROCEDURE test_part_insert_function();
 
 
-DROP TRIGGER (Cannott CREATE OR REPLACE IT)
->>> print stmts[4]
+DROP TRIGGER (Cannot CREATE OR REPLACE IT)
+--------------------------------------------
+
+>>> print p.drop_trigger_code()
 DROP TRIGGER insert_test_part_trigger ON test_part;
 
 INDEX CREATION
->>> print stmts[5]
+----------------
+
+>>> print p.create_idx_ddl()
 CREATE INDEX test_part_0_0_index ON test_part_0 (adweekid);
 CREATE INDEX test_part_1_0_index ON test_part_1 (adweekid);
 
 INDEX DROPPING
->>> print stmts[6]
+---------------
+>>> print p.drop_idx_ddl()
 DROP INDEX test_part_0_0_index;
 DROP INDEX test_part_1_0_index;
 
 
 ARBITRARY SQL
->>> print stmts[7]
+--------------
+
+>>> print p.sql('VACUUM ANALYZE {table_name};')
 VACUUM ANALYZE test_part_0;
 VACUUM ANALYZE test_part_1;
 
 '''
+from collections import namedtuple
 import datetime as dt
 import optparse
 import sys
@@ -90,135 +154,29 @@ import time
 
 import meta
 
-class Partitioner(object):
-    def __init__(self):
-        # probably should put some state in here
-        pass
 
-
-    def create_ddl(self, *args, **kw):
-        return self.create_integer_statements(*args, **kw)[0]
-
-    def drop_ddl(self, *args, **kw):
-        return self.create_integer_statements(*args, **kw)[1]
-
-    def function_code(self, *args, **kw):
-        return self.create_integer_statements(*args, **kw)[2]
-
-    def trigger_code(self, *args, **kw):
-        return self.create_integer_statements(*args, **kw)[3]
-
-    def drop_trigger_code(self, *args, **kw):
-        return self.create_integer_statements(*args, **kw)[4]
-
-    def create_idx_ddl(self, *args, **kw):
-        return self.create_integer_statements(*args, **kw)[5]
-
-    def drop_idx_ddl(self, *args, **kw):
-        return self.create_integer_statements(*args, **kw)[6]
-
-    def sql(self, *args, **kw):
-        return self.create_integer_statements(*args, **kw)[7]
-
-    def create_integer_statements(self, master_table_name, column, start, end,
-                                  stride=1, prefix='', partition_table_name=None,
-                                  index_columns_list=None, arbitrary_sql=None):
-        """
-        index_columns_list: list of (col1,col2) tuples for index
-                            creation, defaults to partitioning column
-        arbitrary_sql: say you want to vacuum tables, pass in 'VACUUM %s;'
-        """
-        partition_table_name = partition_table_name or master_table_name
-        index_columns_list = index_columns_list or [(column,)]
-
-        create_stmts = []
-        drop_stmts = []
-        function_stmts = ["""CREATE OR REPLACE FUNCTION %(table_name)s_insert_function()
-RETURNS TRIGGER AS $$
-BEGIN""" % dict(table_name=partition_table_name)]
-        trigger_stmts = []
-        drop_trigger_stmts = []
-        create_idx = []
-        drop_idx = []
-        arb_stmts = []
-        for prev, num in gen_chunks(start, end, stride):
-            postfix = '_%d' % prev
-            individual_table_name = "%(prefix)s%(table_name)s%(postfix)s" % dict(prefix=prefix,
-                                        table_name=partition_table_name,
-                                        postfix=postfix)
-            create_stmts.append("""CREATE TABLE %(table_name)s (
-    CHECK ( %(column)s >= %(start)s AND %(column)s < %(end)s )
-) INHERITS (%(master_table)s);""" % dict(table_name=individual_table_name,
-                                        column=column,
-                                        start=prev,
-                                        end=num,
-                                        master_table=master_table_name))
-            drop_stmts.append("""DROP TABLE %(table_name)s;""" %
-                              dict(table_name=individual_table_name))
-
-            if prev == start:
-                if_or_else = "IF"
-            else:
-                if_or_else = "ELSIF"
-            function_stmts.append("""    %(if_or_else)s ( NEW.%(column)s >= %(start)s AND NEW.%(column)s < %(end)s ) THEN
-        INSERT INTO %(table_name)s VALUES (NEW.*);"""%
-                                 dict(table_name=individual_table_name,
-                                      column=column,
-                                      start=prev,
-                                      end=num,
-                                      if_or_else=if_or_else))
-
-            for j, col_list in enumerate(index_columns_list):
-                index_name = "%(table_name)s_%(count)s_index" %dict(table_name=individual_table_name, count=j)
-                create_idx.append("""CREATE INDEX %(index_name)s ON %(table_name)s (%(cols)s);""" %
-                                  dict(table_name=individual_table_name,
-                                       index_name=index_name,
-                                       cols=','.join(col_list)))
-                drop_idx.append("""DROP INDEX %(index_name)s;""" %
-                                  dict(index_name=index_name))
-
-            if arbitrary_sql:
-                arb_stmts.append(arbitrary_sql % {'table':individual_table_name})
-
-
-        function_stmts.append("""    ELSE
-        RAISE EXCEPTION '%(column)s out of range.  Fix the %(table_name)s_insert_function() function!';
-    END IF;
-    RETURN NULL;
-END;
-$$
-LANGUAGE plpgsql;"""% dict(table_name=partition_table_name,
-                             column=column))
-
-        trigger_stmts.append("""CREATE TRIGGER insert_%(table_name)s_trigger
-    BEFORE INSERT ON %(table_name)s
-    FOR EACH ROW EXECUTE PROCEDURE %(table_name)s_insert_function();"""  % dict(table_name=partition_table_name))
-
-        drop_trigger_stmts.append("""DROP TRIGGER insert_%(table_name)s_trigger ON %(table_name)s;""" % dict(table_name=partition_table_name))
-        create = '\n'.join(create_stmts)
-        drop = '\n'.join(drop_stmts)
-        function = '\n'.join(function_stmts) #already has ;
-        trig = '\n'.join(trigger_stmts)
-        drop_trig = '\n'.join(drop_trigger_stmts)
-        idx = '\n'.join(create_idx)
-        del_idx = '\n'.join(drop_idx)
-        arb_sql = '\n'.join(arb_stmts)
-        return create, drop, function, trig, drop_trig, idx, del_idx, arb_sql
-
-
-def month_range(start, end, stride=1, fmt="%Y-%m"):
+def month_range_str(start, end, stride=1, fmt="%Y-%m"):
     """
-    >>> list(month_range('2012-11', '2013-02'))
-    [datetime.date(2012, 11, 1), datetime.date(2012, 12, 1), datetime.date(2013, 1, 1)]
+    >>> list(month_range_str('2012-11', '2013-02'))
+    ['2012-11', '2012-12', '2013-01']
     """
     start_date = dt.date(*time.strptime(start, fmt)[:3])
-    next_month = start_date.month
-    next_year = start_date.year
     end_date = dt.date(*time.strptime(end, fmt)[:3])
-    end_month = end_date.month
-    end_year = end_date.year
+    for month in month_range(start_date, end_date, stride):
+        yield month.strftime(fmt)
+
+
+def month_range(start, end, stride=1):
+    """
+    >>> list(month_range(dt.date(2012, 11, 1), dt.date(2013, 2, 1)))
+    [datetime.date(2012, 11, 1), datetime.date(2012, 12, 1), datetime.date(2013, 1, 1)]
+    """
+    next_month = start.month
+    next_year = start.year
+    end_month = end.month
+    end_year = end.year
     item = dt.date(next_year, next_month, 1)
-    while item < end_date:
+    while item < end:
         yield item
         item = add_month(item, stride)
 
@@ -233,38 +191,186 @@ def add_month(date, months=1):
     return dt.date(year, month, 1)
 
 
-def month_chunk(start, end, stride=1, fmt="%Y-%m"):
+def month_chunk_str(start, end, stride=1, fmt="%Y-%m", out_fmt="%Y-%m-%d"):
     """
-    >>> list(month_chunk('2012-11', '2013-02'))
+    >>> list(month_chunk_str('2012-11', '2013-02'))
+    [('2012-11-01', '2012-12-01'), ('2012-12-01', '2013-01-01'), ('2013-01-01', '2013-02-01')]
+    """
+    start_date = dt.date(*time.strptime(start, fmt)[:3])
+    end_date = dt.date(*time.strptime(end, fmt)[:3])
+    for chunk in month_chunk(start_date, end_date, stride):
+        yield (chunk[0].strftime(out_fmt),chunk[1].strftime(out_fmt))
+
+def month_chunk(start, end, stride=1):
+    """
+    >>> list(month_chunk(dt.date(2012, 11, 1), dt.date(2013, 2, 1)))
     [(datetime.date(2012, 11, 1), datetime.date(2012, 12, 1)), (datetime.date(2012, 12, 1), datetime.date(2013, 1, 1)), (datetime.date(2013, 1, 1), datetime.date(2013, 2, 1))]
     """
     prev = None
-    end = add_month(dt.date(*time.strptime(end, fmt)[:3])).strftime(fmt)
-    for date in month_range(start, end, stride, fmt):
+    end = add_month(end)
+    for date in month_range(start, end, stride):
         if prev:
             yield prev, date
         prev = date
 
+# sql_* is for a what appears in the CHECK statement
+Chunk = namedtuple('Chunk', ['start', 'end', 'suffix', 'sql_start', 'sql_end'])
 
-class MonthPartitioner(Partitioner):
-    def create_ddl(self, dbname, column, start, end, fmt="%Y-%m", prefix=''):
-        stmt = []
-        pg_format = "%Y-%m-%d"
-        for date_start, date_end in month_chunk(start, end, fmt=fmt):
-            pg_start = date_start.strftime(pg_format)
-            pg_end = date_end.strftime(pg_format)
-            postfix = '_%s' % pg_start[:-3]  # dont' show day
-            individual_table_name = "%(prefix)s%(table_name)s%(postfix)s" % dict(prefix=prefix,
-                    table_name=dbname,
-                    postfix=postfix)
-            stmt.append("""CREATE TABLE %(table_name)s (
-    CHECK ( %(column)s >= %(start)s AND %(column)s < %(end)s )
-) INHERITS (%(master_table)s);""" % dict(table_name=individual_table_name,
-                                        column=column,
-                                        start=pg_start,
-                                        end=pg_end,
-                                        master_table=dbname))
+class MonthChunker(object):
+    def __init__(self, start, end, fmt='%Y-%m'):
+        self.start = start
+        self.end = end
+        self.start_date = dt.date(*time.strptime(start, fmt)[:3])
+        self.end_date = dt.date(*time.strptime(end, fmt)[:3])
+        self.fmt = fmt
+
+    def __iter__(self):
+        for item in month_chunk_str(self.start, self.end, fmt=self.fmt):
+            suffix = '_' + item[0][:-3]  # don't show day
+            sql_start = "'{0}'".format(item[0])
+            sql_end = "'{0}'".format(item[1])
+            yield Chunk(item[0], item[1], suffix, sql_start, sql_end)
+
+class IntChunker(object):
+    def __init__(self, start, end, stride):
+        self.start = start
+        self.end = end
+        self.stride = stride
+
+    def __iter__(self):
+        for prev, num in gen_chunks(self.start, self.end, self.stride):
+            suffix = '_{0}'.format(prev)
+            yield Chunk(prev, num, suffix, prev, num)
+
+class RangePartitioner(object):
+    def __init__(self, chunker, table_name, column, index_columns_list=None):
+        self.chunker = chunker
+        self.table_name = table_name
+        self.column = column
+        self.index_columns_list = index_columns_list
+
+    def _sql_gen(self, template, start=None, end=None,
+                 first_item=None, middle_items=None, last_item=None,
+                 do_index=False):
+        """
+        The template can have the following replacement vars:
+
+        master_table_name - name of table
+        column - name of column partitioning on
+        start - value for initial range item (ie item >= start)
+        end - value for end item (ie item < end)
+        table_name - name of partitioned tables
+        pos_item - value that can be set with
+          first_item - if you need to insert an IF
+          middle_items - if you need to insert ELSIF...
+          end_item - if you need ELSE
+        index_name - name of index on partitioned table (based on column or
+                     index_columns_list)
+        index_cols - columns where index is placed
+        """
+        if start:
+            stmt = [start.format(master_table_name=self.table_name)]
+        else:
+            stmt = []
+        chunks = list(self.chunker)
+        if template:
+            cols = self.index_columns_list or [self.column]
+            for i, chunk in enumerate(chunks):
+                table_name = '{0}{1}'.format(self.table_name, chunk.suffix)
+                if i == 0 and first_item:
+                    pos_item = first_item
+                elif i == len(chunks)-1 and last_item:
+                    pos_item = last_item
+                else:
+                    pos_item = middle_items
+                if do_index:
+                    for j, col_list in enumerate(cols):
+                        index_name = '{0}_{1}_index'.format(table_name, j)
+                        col_str = ','.join(cols)
+                        stmt.append(template.format(**dict(
+                            column=self.column,
+                            start=chunk.sql_start,
+                            end=chunk.sql_end,
+                            master_table_name=self.table_name,
+                            table_name=table_name,
+                            pos_item=pos_item,
+                            index_name=index_name,
+                            index_cols=col_str
+                            )))
+                else:
+                    stmt.append(template.format(**dict(
+                        column=self.column,
+                        start=chunk.sql_start,
+                        end=chunk.sql_end,
+                        master_table_name=self.table_name,
+                        table_name=table_name,
+                        pos_item=pos_item
+                        )))
+        if end:
+            stmt.append(end.format(column=self.column,
+                master_table_name=self.table_name))
         return '\n'.join(stmt)
+
+    def create_ddl(self):
+        temp = """CREATE TABLE {table_name} (
+    CHECK ( {column} >= {start} AND {column} < {end} )
+) INHERITS ({master_table_name});"""
+        return self._sql_gen(temp)
+
+    def drop_ddl(self):
+        return self._sql_gen("""DROP TABLE {table_name};""")
+
+    def function_code(self):
+        return self._sql_gen("""    {pos_item} ( NEW.{column} >= {start} AND NEW.{column} < {end} ) THEN
+        INSERT INTO {table_name} VALUES (NEW.*);""",
+            start="""CREATE OR REPLACE FUNCTION {master_table_name}_insert_function()
+RETURNS TRIGGER AS $$
+BEGIN""",
+            end="""    ELSE
+        RAISE EXCEPTION '{column} out of range.  Fix the {master_table_name}_insert_function() function!';
+    END IF;
+    RETURN NULL;
+END;
+$$
+LANGUAGE plpgsql;""",
+            first_item="IF",
+            middle_items="ELSIF")
+
+        return self.create_integer_statements(*args, **kw)[2]
+
+    def trigger_code(self):
+        return self._sql_gen(None, start="""CREATE TRIGGER insert_{master_table_name}_trigger
+    BEFORE INSERT ON {master_table_name}
+    FOR EACH ROW EXECUTE PROCEDURE {master_table_name}_insert_function();""")
+
+
+    def drop_trigger_code(self):
+        return self._sql_gen(None, start="""DROP TRIGGER insert_{master_table_name}_trigger ON {master_table_name};""")
+
+
+    def create_idx_ddl(self, *args, **kw):
+        return self._sql_gen("""CREATE INDEX {index_name} ON {table_name} ({index_cols});""",
+                             do_index=True)
+
+    def drop_idx_ddl(self, *args, **kw):
+        return self._sql_gen("""DROP INDEX {index_name};""",
+                             do_index=True)
+
+
+
+    def sql(self, sql, start=None, end=None):
+        return self._sql_gen(sql, start=start, end=end)
+
+
+class MonthPartitioner(RangePartitioner):
+    def __init__(self, table_name, column, start, end, fmt="%Y-%m"):
+        chunker = MonthChunker(start, end, fmt)
+        super(MonthPartitioner, self).__init__(chunker, table_name, column)
+
+class IntPartitioner(RangePartitioner):
+    def __init__(self, table_name, column, start, end, stride=1):
+        chunker = IntChunker(start, end, stride)
+        super(IntPartitioner, self).__init__(chunker, table_name, column)
 
 def gen_chunks(start, end, stride):
     """
@@ -281,9 +387,11 @@ def gen_chunks(start, end, stride):
     for i, num in enumerate(xrange(start, end, stride)):
         yield num, num + stride
 
+
 def _test():
     import doctest
     doctest.testmod()
+
 
 def main(prog_args):
     parser = optparse.OptionParser(version=meta.__version__)
@@ -317,27 +425,25 @@ def main(prog_args):
     opt.end = int(opt.end)
     opt.stride = int(opt.stride)
 
-    p = Partitioner()
-
-    kwargs = dict(master_table_name=opt.master_table, column=opt.column, start=opt.start, end=opt.end,
-                  stride=opt.stride, arbitrary_sql=opt.arbitrary_sql)
+    p = IntPartitioner(opt.master_table, opt.column, opt.start, opt.end,
+                       opt.stride)
 
     if opt.create_ddl:
-        print p.create_ddl(**kwargs)
+        print p.create_ddl()
     if opt.drop_ddl:
-        print p.drop_ddl(**kwargs)
+        print p.drop_ddl()
     if opt.create_function:
-        print p.function_code(**kwargs)
+        print p.function_code()
     if opt.create_trigger:
-        print p.trigger_code(**kwargs)
+        print p.trigger_code()
     if opt.drop_trigger:
-        print p.drop_trigger_code(**kwargs)
+        print p.drop_trigger_code()
     if opt.create_index_ddl:
-        print p.create_idx_ddl(**kwargs)
+        print p.create_idx_ddl()
     if opt.drop_index_ddl:
-        print p.drop_idx_ddl(**kwargs)
+        print p.drop_idx_ddl()
     if opt.arbitrary_sql:
-        print p.sql(**kwargs)
+        print p.sql(opt.arbitrary)
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv))
