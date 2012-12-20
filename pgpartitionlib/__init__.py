@@ -155,17 +155,6 @@ import time
 import meta
 
 
-def month_range_str(start, end, stride=1, fmt="%Y-%m"):
-    """
-    >>> list(month_range_str('2012-11', '2013-02'))
-    ['2012-11', '2012-12', '2013-01']
-    """
-    start_date = dt.date(*time.strptime(start, fmt)[:3])
-    end_date = dt.date(*time.strptime(end, fmt)[:3])
-    for month in month_range(start_date, end_date, stride):
-        yield month.strftime(fmt)
-
-
 def month_range(start, end, stride=1):
     """
     >>> list(month_range(dt.date(2012, 11, 1), dt.date(2013, 2, 1)))
@@ -220,8 +209,6 @@ class MonthChunker(object):
     def __init__(self, start, end, fmt='%Y-%m'):
         self.start = start
         self.end = end
-        self.start_date = dt.date(*time.strptime(start, fmt)[:3])
-        self.end_date = dt.date(*time.strptime(end, fmt)[:3])
         self.fmt = fmt
 
     def __iter__(self):
