@@ -218,7 +218,9 @@ class MonthChunker(object):
             sql_end = "'{0}'".format(item[1])
             yield Chunk(item[0], item[1], suffix, sql_start, sql_end)
 
+
 class IntChunker(object):
+    """ Should have a constant stride """
     def __init__(self, start, end, stride):
         self.start = start
         self.end = end
@@ -228,6 +230,24 @@ class IntChunker(object):
         for prev, num in gen_chunks(self.start, self.end, self.stride):
             suffix = '_{0}'.format(prev)
             yield Chunk(prev, num, suffix, prev, num)
+
+
+class ArbitraryIntChunker(object):
+    """Takes a list of start nums (end is < next num)
+    >>> list(ArbitraryIntChunker([1,32,60,91]))
+    [Chunk(start=1, end=32, suffix='_1', sql_start=1, sql_end=32), Chunk(start=32, end=60, suffix='_32', sql_start=32, sql_end=60), Chunk(start=60, end=91, suffix='_60', sql_start=60, sql_end=91)]
+    """
+    def __init__(self, nums):
+        self.nums = nums
+
+    def __iter__(self):
+        prev = None
+        for num in self.nums:
+            suffix = '_{0}'.format(prev)
+            if prev is not None:
+                yield Chunk(prev, num, suffix, prev, num)
+            prev = num
+
 
 class RangePartitioner(object):
     def __init__(self, chunker, table_name, column, index_columns_list=None):
@@ -330,10 +350,8 @@ LANGUAGE plpgsql;""",
     BEFORE INSERT ON {master_table_name}
     FOR EACH ROW EXECUTE PROCEDURE {master_table_name}_insert_function();""")
 
-
     def drop_trigger_code(self):
         return self._sql_gen(None, start="""DROP TRIGGER insert_{master_table_name}_trigger ON {master_table_name};""")
-
 
     def create_idx_ddl(self, *args, **kw):
         return self._sql_gen("""CREATE INDEX {index_name} ON {table_name} ({index_cols});""",
@@ -342,8 +360,6 @@ LANGUAGE plpgsql;""",
     def drop_idx_ddl(self, *args, **kw):
         return self._sql_gen("""DROP INDEX {index_name};""",
                              do_index=True)
-
-
 
     def sql(self, sql, start=None, end=None):
         return self._sql_gen(sql, start=start, end=end)
@@ -354,10 +370,18 @@ class MonthPartitioner(RangePartitioner):
         chunker = MonthChunker(start, end, fmt)
         super(MonthPartitioner, self).__init__(chunker, table_name, column)
 
+
 class IntPartitioner(RangePartitioner):
     def __init__(self, table_name, column, start, end, stride=1):
         chunker = IntChunker(start, end, stride)
         super(IntPartitioner, self).__init__(chunker, table_name, column)
+
+
+class ArbitraryIntPartitioner(RangePartitioner):
+    def __init__(self, table_name, column, nums):
+        chunker = ArbitraryIntChunker(nums)
+        super(ArbitraryIntPartitioner, self).__init__(chunker, table_name, column)
+
 
 def gen_chunks(start, end, stride):
     """
