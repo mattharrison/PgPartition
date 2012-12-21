@@ -318,6 +318,9 @@ class RangePartitioner(object):
                 master_table_name=self.table_name))
         return '\n'.join(stmt)
 
+    def create_language(self):
+        return """CREATE LANGUAGE plpgsql;"""
+
     def create_ddl(self):
         temp = """CREATE TABLE {table_name} (
     CHECK ( {column} >= {start} AND {column} < {end} )
